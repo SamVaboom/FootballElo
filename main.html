@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Champions League Elo Ratings</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">European Cup analytics MVP</p>
+      <h1>Champions League Elo Ratings</h1>
+      <p class="intro">
+        A browser-based Elo dashboard for UEFA Champions League and European Cup matches.
+        Ratings update chronologically, persist across seasons, and include controlled
+        football-specific K-factors, goal-difference multipliers, and knockout bonuses.
+      </p>
+    </div>
+    <div class="source-card">
+      <span>Intended source</span>
+      <strong>openfootball/champions-league</strong>
+      <p>Current build runs on illustrative normalized sample data, not a complete official match archive; the adapter layer is ready for football.txt imports.</p>
+    </div>
+  </header>
+
+  <main class="dashboard">
+    <nav class="tabs" aria-label="Dashboard sections">
+      <button class="tab-button active" data-tab="eloTab">Elo Ranking</button>
+      <button class="tab-button" data-tab="recordsTab">Records</button>
+    </nav>
+
+    <section id="eloTab" class="tab-panel active">
+      <div class="panel-header">
+        <div>
+          <h2>Elo Ranking</h2>
+          <p id="rankingCaption">Latest ratings after all sample seasons</p>
+        </div>
+        <div class="controls">
+          <label>
+            Season
+            <select id="seasonSelect"></select>
+          </label>
+          <label>
+            Search team
+            <input id="teamSearch" type="search" placeholder="Real Madrid, Bayern...">
+          </label>
+          <label class="toggle">
+            <input id="activeOnly" type="checkbox" checked>
+            <span>Active teams only</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="table-shell">
+        <table class="ranking-table">
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Team</th>
+              <th>Elo</th>
+              <th>Elo Change This Season</th>
+              <th>Matches</th>
+              <th>W</th>
+              <th>D</th>
+              <th>L</th>
+              <th>Goals For</th>
+              <th>Goals Against</th>
+              <th>Goal Difference</th>
+              <th>Highest Elo This Season</th>
+              <th>Stage Reached</th>
+            </tr>
+          </thead>
+          <tbody id="rankingBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="recordsTab" class="tab-panel">
+      <div class="panel-header">
+        <div>
+          <h2>Records / Stats</h2>
+          <p>Calculated from Elo history entries, match metadata, and end-of-season snapshots.</p>
+        </div>
+      </div>
+      <div id="recordsGrid" class="records-grid"></div>
+    </section>
+  </main>
+
+  <script src="dataAdapter.js"></script>
+  <script src="sampleData.js"></script>
+  <script src="FootballEloLogic.js"></script>
+  <script src="records.js"></script>
+  <script src="ui.js"></script>
+</body>
+</html>
