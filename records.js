@@ -62,12 +62,12 @@
   }
 
   function calculateMostPointsGainedInSeason(engine) {
-    const row = maxBy(seasonRows(engine), 'seasonChange');
+    const row = maxBy(seasonRows(engine).filter((r) => r.active), 'seasonChange');
     return row && card('Most Elo gained in a single season', row.team, signed(row.seasonChange), `${row.season}: ${fmt(row.seasonStartElo)} → ${fmt(row.seasonEndElo)}`);
   }
 
   function calculateMostPointsLostInSeason(engine) {
-    const row = minBy(seasonRows(engine), 'seasonChange');
+    const row = minBy(seasonRows(engine).filter((r) => r.active), 'seasonChange');
     return row && card('Most Elo lost in a single season', row.team, signed(row.seasonChange), `${row.season}: ${fmt(row.seasonStartElo)} → ${fmt(row.seasonEndElo)}`);
   }
 
@@ -90,7 +90,7 @@
         if (!best || current > best.count) best = { team: team.teamName, count: current };
       });
     });
-    return best && card('Longest streak above 1800 Elo', best.team, `${best.count} rating events`, 'Counted after match updates in the sample history.');
+    return best && card('Longest streak above 1800 Elo', best.team, `${best.count} rating events`, 'Counted after match updates in the full history.');
   }
 
   function calculateMostSeasonsFinishingNumberOne(engine) {
@@ -117,8 +117,8 @@
   function calculateChampionWithLowestEloBeforeFinal(engine) {
     const finals = engine.matchHistory.filter((m) => /final/i.test(m.round));
     const winners = finals.map((m) => {
-      const homeWon = m.homeGoals > m.awayGoals;
-      const winner = homeWon ? m.homeTeam : m.awayTeam;
+      const winner = m.penaltyWinner || (m.homeGoals > m.awayGoals ? m.homeTeam : m.awayTeam);
+      const homeWon = winner === m.homeTeam;
       return {
         team: winner,
         opponent: homeWon ? m.awayTeam : m.homeTeam,
@@ -153,7 +153,7 @@
   function calculateMostVolatileTeam(engine) {
     const eligible = [...engine.teams.values()].filter((t) => t.matchesPlayed >= 5).map((t) => ({ team: t.teamName, avg: t.totalAbsChange / t.matchesPlayed, matches: t.matchesPlayed }));
     const row = maxBy(eligible, 'avg');
-    return row && card('Most volatile team', row.team, `${row.avg.toFixed(1)} avg |Δ|`, `${row.matches} matches minimum-filtered sample.`);
+    return row && card('Most volatile team', row.team, `${row.avg.toFixed(1)} avg |Δ|`, `${row.matches} matches minimum-filtered history.`);
   }
 
   function calculateMostStableEliteTeam(engine) {

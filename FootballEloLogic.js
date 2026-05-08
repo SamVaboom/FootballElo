@@ -1,10 +1,7 @@
 /*
- * Core Champions League Elo engine.
- *
- * The engine is intentionally data-source agnostic. It accepts normalized match
- * objects from dataAdapter.js/sampleData.js and keeps decimal ratings internally;
- * UI code rounds only for display so winner/loser deltas remain equal and
- * opposite before rounding.
+ * Core Champions League Elo engine. Ratings are stored as decimals internally;
+ * UI rendering rounds only at display time so match deltas remain equal and
+ * opposite before bonuses are applied.
  */
 (function (global) {
   const INITIAL_ELO = {
@@ -16,6 +13,26 @@
     final: 1500,
   };
 
+  const K_FACTORS = {
+    qualifying: 24,
+    preliminary: 24,
+    group: 32,
+    league: 32,
+    roundOf16: 36,
+    quarterFinal: 40,
+    semiFinal: 44,
+    final: 50,
+    knockout: 36,
+  };
+
+  const GOAL_DIFFERENCE_MULTIPLIERS = {
+    draw: 1,
+    oneGoal: 1,
+    twoGoals: 1.25,
+    threeGoals: 1.5,
+    fourPlusGoals: 1.75,
+  };
+
   const ROUND_BONUSES = {
     roundOf16: 50,
     quarterFinal: 50,
@@ -24,16 +41,17 @@
   };
 
   const FINAL_WIN_BONUS = 200;
+  const STAGE_ORDER = global.FootballDataAdapter?.STAGE_ORDER || {
+    qualifying: 0, group: 1, league: 1, knockout: 1, roundOf16: 2, quarterFinal: 3, semiFinal: 4, final: 5, champion: 6,
+  };
 
-  function createEngine(options = {}) {
-    return new ChampionsLeagueEloEngine(options);
-  }
+  function createEngine(options = {}) { return new ChampionsLeagueEloEngine(options); }
 
   class ChampionsLeagueEloEngine {
     constructor(options = {}) {
-      this.baseK = options.baseK ?? 24;
-      this.knockoutK = options.knockoutK ?? 32;
-      this.finalK = options.finalK ?? 40;
+      this.kFactors = { ...K_FACTORS, ...(options.kFactors || {}) };
+      this.roundBonuses = { ...ROUND_BONUSES, ...(options.roundBonuses || {}) };
+      this.finalWinBonus = options.finalWinBonus ?? FINAL_WIN_BONUS;
       this.reset();
     }
 
@@ -45,20 +63,21 @@
       this.seasonStats = new Map();
       this.seasonTeamStartElo = new Map();
       this.appliedBonuses = new Set();
-      this.finalistsRecorded = new Set();
       this.processedMatches = [];
       this.currentMatchIndex = 0;
+      this.debugSummary = null;
     }
 
     getInitialEloForEntryStage(entryStage) {
       const normalized = (entryStage || '').toLowerCase();
       if (normalized.includes('qual') || normalized.includes('prelim')) return INITIAL_ELO.qualifying;
-      return INITIAL_ELO[normalized] || INITIAL_ELO.group;
+      if (normalized.includes('league')) return INITIAL_ELO.league;
+      if (normalized.includes('knock') || normalized.includes('round') || normalized.includes('final')) return INITIAL_ELO.knockout;
+      return INITIAL_ELO.group;
     }
 
     initializeTeam(teamName, firstSeason, firstEntryStage) {
       if (this.teams.has(teamName)) return this.teams.get(teamName);
-
       const startingElo = this.getInitialEloForEntryStage(firstEntryStage);
       const team = {
         teamName,
@@ -81,8 +100,6 @@
         highestElo: startingElo,
         highestEloSeason: firstSeason,
         lowestElo: startingElo,
-        biggestWinGain: null,
-        biggestLossDrop: null,
         peakEvents: 0,
         totalAbsChange: 0,
       };
@@ -91,23 +108,26 @@
     }
 
     calculateExpectedScore(ratingA, ratingB) {
-      return 1 / (1 + 10 ** ((ratingB - ratingA) / 400));
+      return 1 / (1 + Math.pow(10, (ratingB - ratingA) / 400));
     }
 
     getKFactor(match) {
-      const stageType = match.stageType || (global.FootballDataAdapter?.detectStageType(match.round) ?? 'group');
-      const round = (match.round || '').toLowerCase();
-      if (stageType === 'final' || round === 'final') return this.finalK;
-      if (stageType === 'knockout') return this.knockoutK;
-      return this.baseK;
+      const roundKey = match.roundKey || global.FootballDataAdapter?.classifyRound(match.round) || match.stageType || 'group';
+      if (this.kFactors[roundKey]) return this.kFactors[roundKey];
+      if (match.stageType === 'qualifying') return this.kFactors.qualifying;
+      if (match.stageType === 'league') return this.kFactors.league;
+      if (match.stageType === 'final') return this.kFactors.final;
+      if (match.stageType === 'knockout') return this.kFactors.knockout;
+      return this.kFactors.group;
     }
 
     getGoalDifferenceMultiplier(homeGoals, awayGoals) {
       const diff = Math.abs(homeGoals - awayGoals);
-      if (diff <= 1) return 1;
-      if (diff === 2) return 1.25;
-      if (diff === 3) return 1.5;
-      return 1.75;
+      if (diff === 0) return GOAL_DIFFERENCE_MULTIPLIERS.draw;
+      if (diff === 1) return GOAL_DIFFERENCE_MULTIPLIERS.oneGoal;
+      if (diff === 2) return GOAL_DIFFERENCE_MULTIPLIERS.twoGoals;
+      if (diff === 3) return GOAL_DIFFERENCE_MULTIPLIERS.threeGoals;
+      return GOAL_DIFFERENCE_MULTIPLIERS.fourPlusGoals;
     }
 
     calculateMatchEloChange(match, homeRating, awayRating) {
@@ -115,10 +135,9 @@
       let actualHome = 0.5;
       if (match.homeGoals > match.awayGoals) actualHome = 1;
       if (match.homeGoals < match.awayGoals) actualHome = 0;
-
       const k = this.getKFactor(match);
       const gdMultiplier = this.getGoalDifferenceMultiplier(match.homeGoals, match.awayGoals);
-      const change = k * gdMultiplier * (actualHome - expectedHome);
+      const change = k * (actualHome - expectedHome) * gdMultiplier;
       return {
         homeChange: change,
         awayChange: -change,
@@ -136,18 +155,18 @@
       const awayStage = match.awayEntryStage || global.FootballDataAdapter?.detectInitialEntryStage(match.round) || match.stageType;
       const home = this.initializeTeam(match.homeTeam, match.season, homeStage);
       const away = this.initializeTeam(match.awayTeam, match.season, awayStage);
-
       this.prepareSeasonTeam(match.season, home.teamName, home.currentElo);
       this.prepareSeasonTeam(match.season, away.teamName, away.currentElo);
       home.seasonsPlayed.add(match.season);
       away.seasonsPlayed.add(match.season);
+      this.markStageReached(match.season, home.teamName, match.roundKey || match.round);
+      this.markStageReached(match.season, away.teamName, match.roundKey || match.round);
 
       const oldHome = home.currentElo;
       const oldAway = away.currentElo;
       const calc = this.calculateMatchEloChange(match, oldHome, oldAway);
       home.currentElo += calc.homeChange;
       away.currentElo += calc.awayChange;
-
       const result = this.getResult(match);
       this.updateTeamStats(home, match.season, match.homeGoals, match.awayGoals, result.homeResult, calc.homeChange);
       this.updateTeamStats(away, match.season, match.awayGoals, match.homeGoals, result.awayResult, calc.awayChange);
@@ -155,43 +174,25 @@
       const matchMeta = {
         ...match,
         id: match.id || `match-${++this.currentMatchIndex}`,
-        score: `${match.homeGoals}-${match.awayGoals}`,
+        score: `${match.homeGoals}-${match.awayGoals}${match.decidedOnPenalties ? ` (${match.penaltyScore.home}-${match.penaltyScore.away} pen.)` : ''}`,
         homeOldElo: oldHome,
         awayOldElo: oldAway,
         homeNewElo: home.currentElo,
         awayNewElo: away.currentElo,
         homeChange: calc.homeChange,
         awayChange: calc.awayChange,
+        k: calc.k,
+        gdMultiplier: calc.gdMultiplier,
         favoriteBefore: oldHome >= oldAway ? match.homeTeam : match.awayTeam,
         underdogBefore: oldHome < oldAway ? match.homeTeam : match.awayTeam,
+        ratingGap: Math.abs(oldHome - oldAway),
       };
       this.processedMatches.push(matchMeta);
       this.matchHistory.push(matchMeta);
-
-      this.recordHistory({
-        match,
-        team: home.teamName,
-        opponent: away.teamName,
-        oldElo: oldHome,
-        newElo: home.currentElo,
-        change: calc.homeChange,
-        result: result.homeResult,
-      });
-      this.recordHistory({
-        match,
-        team: away.teamName,
-        opponent: home.teamName,
-        oldElo: oldAway,
-        newElo: away.currentElo,
-        change: calc.awayChange,
-        result: result.awayResult,
-      });
-
+      this.recordHistory({ match: matchMeta, team: home.teamName, opponent: away.teamName, oldElo: oldHome, newElo: home.currentElo, change: calc.homeChange, result: result.homeResult });
+      this.recordHistory({ match: matchMeta, team: away.teamName, opponent: home.teamName, oldElo: oldAway, newElo: away.currentElo, change: calc.awayChange, result: result.awayResult });
       this.trackPeak(home, match.season, match.date, `match vs ${away.teamName}`);
       this.trackPeak(away, match.season, match.date, `match vs ${home.teamName}`);
-      this.updateExtremes(home, matchMeta, calc.homeChange);
-      this.updateExtremes(away, matchMeta, calc.awayChange);
-
       return matchMeta;
     }
 
@@ -203,7 +204,9 @@
       if (result === 'D') team.draws += 1;
       if (result === 'L') team.losses += 1;
       team.totalAbsChange += Math.abs(change);
+      team.highestElo = Math.max(team.highestElo, team.currentElo);
       team.lowestElo = Math.min(team.lowestElo, team.currentElo);
+      if (team.currentElo === team.highestElo) team.highestEloSeason = season;
 
       const stats = this.getSeasonTeamStats(season, team.teamName);
       stats.matches += 1;
@@ -228,23 +231,23 @@
         team,
         opponent,
         round: match.round,
+        roundKey: match.roundKey,
         oldElo,
         newElo,
         change,
         reason: 'match',
         matchResult: result,
-        score: `${match.homeGoals}-${match.awayGoals}`,
+        score: match.score || `${match.homeGoals}-${match.awayGoals}`,
         match,
       });
     }
 
     applyRoundBonus(season, teamName, roundKey, context = {}) {
-      const bonus = ROUND_BONUSES[roundKey];
+      const bonus = this.roundBonuses[roundKey];
       const key = `${season}|${teamName}|${roundKey}`;
       if (!bonus || this.appliedBonuses.has(key)) return null;
       const team = this.teams.get(teamName);
       if (!team) return null;
-
       this.appliedBonuses.add(key);
       const oldElo = team.currentElo;
       team.currentElo += bonus;
@@ -252,13 +255,13 @@
       const stats = this.getSeasonTeamStats(season, teamName);
       stats.highestEloThisSeason = Math.max(stats.highestEloThisSeason, team.currentElo);
       stats.stageReached = this.bestStage(stats.stageReached, roundKey);
-
       const entry = {
         season,
         date: context.date || '',
         team: teamName,
         opponent: context.opponent || null,
         round: context.round || this.labelRoundKey(roundKey),
+        roundKey,
         oldElo,
         newElo: team.currentElo,
         change: bonus,
@@ -272,167 +275,35 @@
     }
 
     applyFinalWinBonus(season, teamName, context = {}) {
-      const key = `${season}|${teamName}|final_win`;
+      const key = `${season}|${teamName}|champion`;
       if (this.appliedBonuses.has(key)) return null;
       const team = this.teams.get(teamName);
       if (!team) return null;
-
       this.appliedBonuses.add(key);
       const oldElo = team.currentElo;
-      team.currentElo += FINAL_WIN_BONUS;
+      team.currentElo += this.finalWinBonus;
       team.trophies += 1;
       const stats = this.getSeasonTeamStats(season, teamName);
       stats.isChampion = true;
       stats.stageReached = 'champion';
       stats.highestEloThisSeason = Math.max(stats.highestEloThisSeason, team.currentElo);
-
       const entry = {
         season,
         date: context.date || '',
         team: teamName,
         opponent: context.opponent || null,
-        round: context.round || 'Final',
+        round: 'Final winner bonus',
+        roundKey: 'champion',
         oldElo,
         newElo: team.currentElo,
-        change: FINAL_WIN_BONUS,
+        change: this.finalWinBonus,
         reason: 'final_win_bonus',
-        matchResult: 'W',
+        matchResult: 'Champion',
         score: context.score || '',
       };
       this.history.push(entry);
-      this.trackPeak(team, season, context.date || '', 'final win bonus');
+      this.trackPeak(team, season, context.date || '', 'bonus: Champion');
       return entry;
-    }
-
-    processSeason(season, matches) {
-      const sorted = [...matches].sort(compareMatchesChronologically);
-      for (const match of sorted) {
-        const processed = this.processMatch(match);
-        this.markStageParticipation(match);
-        this.applyAdvancementBonuses(match, processed);
-      }
-      const snapshot = this.getSeasonSnapshot(season);
-      this.seasonSnapshots.push(snapshot);
-      return snapshot;
-    }
-
-    processAllSeasons(matches) {
-      this.reset();
-      const bySeason = groupBy(matches, 'season');
-      Object.keys(bySeason).sort(compareSeasonLabels).forEach((season) => this.processSeason(season, bySeason[season]));
-      return {
-        teams: this.teams,
-        history: this.history,
-        matchHistory: this.matchHistory,
-        seasonSnapshots: this.seasonSnapshots,
-      };
-    }
-
-    applyAdvancementBonuses(match, processed) {
-      const advancements = match.advancements || global.FootballDataAdapter?.detectRoundAdvancement(match) || [];
-      advancements.forEach((adv) => {
-        this.applyRoundBonus(match.season, adv.team, adv.roundKey, {
-          date: match.date,
-          opponent: adv.opponent,
-          round: adv.label || this.labelRoundKey(adv.roundKey),
-          score: processed.score,
-        });
-      });
-
-      if (match.stageType === 'final' || /\bfinal\b/i.test(match.round)) {
-        [match.homeTeam, match.awayTeam].forEach((team) => {
-          this.applyRoundBonus(match.season, team, 'final', {
-            date: match.date,
-            opponent: team === match.homeTeam ? match.awayTeam : match.homeTeam,
-            round: 'Reached Final',
-            score: processed.score,
-          });
-        });
-        const result = this.getResult(match);
-        if (result.winner) {
-          this.applyFinalWinBonus(match.season, result.winner, {
-            date: match.date,
-            opponent: result.loser,
-            round: 'Final',
-            score: processed.score,
-          });
-        }
-      }
-    }
-
-    markStageParticipation(match) {
-      [match.homeTeam, match.awayTeam].forEach((teamName) => {
-        const stats = this.getSeasonTeamStats(match.season, teamName);
-        const roundKey = global.FootballDataAdapter?.roundToStageKey(match.round) || match.stageType || 'group';
-        stats.stageReached = this.bestStage(stats.stageReached, roundKey);
-      });
-    }
-
-    getSeasonSnapshot(season) {
-      const starts = this.seasonTeamStartElo.get(season) || new Map();
-      const seasonMap = this.seasonStats.get(season) || new Map();
-      const rankings = [...this.teams.values()].map((team) => {
-        const stats = seasonMap.get(team.teamName) || this.createEmptySeasonStats(team.currentElo);
-        const seasonStartElo = starts.get(team.teamName) ?? team.currentElo;
-        return {
-          rank: 0,
-          team: team.teamName,
-          elo: team.currentElo,
-          seasonStartElo,
-          seasonEndElo: team.currentElo,
-          seasonChange: team.currentElo - seasonStartElo,
-          active: seasonMap.has(team.teamName),
-          matches: stats.matches,
-          wins: stats.wins,
-          draws: stats.draws,
-          losses: stats.losses,
-          goalsFor: stats.goalsFor,
-          goalsAgainst: stats.goalsAgainst,
-          goalDifference: stats.goalsFor - stats.goalsAgainst,
-          highestEloThisSeason: stats.highestEloThisSeason,
-          stageReached: stats.stageReached,
-          isChampion: stats.isChampion,
-        };
-      }).sort((a, b) => b.elo - a.elo)
-        .map((row, index) => ({ ...row, rank: index + 1 }));
-      return { season, rankings };
-    }
-
-    getCurrentRankings() {
-      return [...this.teams.values()]
-        .sort((a, b) => b.currentElo - a.currentElo)
-        .map((team, index) => ({ rank: index + 1, team: team.teamName, elo: team.currentElo, ...team }));
-    }
-
-    getTeamHistory(teamName) {
-      return this.history.filter((entry) => entry.team === teamName);
-    }
-
-    prepareSeasonTeam(season, teamName, elo) {
-      if (!this.seasonTeamStartElo.has(season)) this.seasonTeamStartElo.set(season, new Map());
-      if (!this.seasonTeamStartElo.get(season).has(teamName)) this.seasonTeamStartElo.get(season).set(teamName, elo);
-      this.getSeasonTeamStats(season, teamName);
-    }
-
-    getSeasonTeamStats(season, teamName) {
-      if (!this.seasonStats.has(season)) this.seasonStats.set(season, new Map());
-      const seasonMap = this.seasonStats.get(season);
-      if (!seasonMap.has(teamName)) seasonMap.set(teamName, this.createEmptySeasonStats(this.teams.get(teamName)?.currentElo ?? 1500));
-      return seasonMap.get(teamName);
-    }
-
-    createEmptySeasonStats(elo) {
-      return {
-        matches: 0,
-        wins: 0,
-        draws: 0,
-        losses: 0,
-        goalsFor: 0,
-        goalsAgainst: 0,
-        highestEloThisSeason: elo,
-        stageReached: 'not active',
-        isChampion: false,
-      };
     }
 
     incrementRoundCounter(team, roundKey) {
@@ -442,78 +313,224 @@
       if (roundKey === 'final') team.finals += 1;
     }
 
-    bestStage(current, candidate) {
-      const order = ['not active', 'qualifying', 'group', 'league', 'roundOf16', 'quarterFinal', 'semiFinal', 'final', 'champion'];
-      return order.indexOf(candidate) > order.indexOf(current) ? candidate : current;
+    processSeason(seasonData) {
+      const season = seasonData.season;
+      const matches = [...(seasonData.matches || [])].sort((a, b) => (a.date || '').localeCompare(b.date || '') || a.order - b.order);
+      const participationBonusApplied = new Set();
+      matches.forEach((match) => {
+        this.prepareEntrantsForMatch(match);
+        this.applyParticipationBonuses(seasonData, match, participationBonusApplied);
+        const meta = this.processMatch(match);
+        if (match.roundKey === 'final') {
+          const winner = this.getFinalWinner(match);
+          if (winner) this.applyFinalWinBonus(season, winner, { date: match.date, opponent: winner === match.homeTeam ? match.awayTeam : match.homeTeam, score: meta.score });
+        }
+      });
+      this.applyDerivedAdvancementBonuses(seasonData);
+      const snapshot = this.createSeasonSnapshot(season);
+      this.seasonSnapshots.push(snapshot);
+      return snapshot;
     }
 
-    labelRoundKey(roundKey) {
-      return {
-        roundOf16: 'Reached Round of 16',
-        quarterFinal: 'Reached Quarter-finals',
-        semiFinal: 'Reached Semi-finals',
-        final: 'Reached Final',
-      }[roundKey] || roundKey;
+    prepareEntrantsForMatch(match) {
+      [
+        [match.homeTeam, match.homeEntryStage || global.FootballDataAdapter?.detectInitialEntryStage(match.round)],
+        [match.awayTeam, match.awayEntryStage || global.FootballDataAdapter?.detectInitialEntryStage(match.round)],
+      ].forEach(([teamName, entryStage]) => {
+        const team = this.initializeTeam(teamName, match.season, entryStage);
+        this.prepareSeasonTeam(match.season, teamName, team.currentElo);
+      });
     }
 
-    trackPeak(team, season, date, context) {
+    applyParticipationBonuses(seasonData, match, cache) {
+      const roundKey = match.roundKey;
+      if (!this.roundBonuses[roundKey] || cache.has(roundKey)) return;
+      const teams = seasonData.participantsByRound?.[roundKey] || [];
+      teams.forEach((team) => this.applyRoundBonus(seasonData.season, team, roundKey, { date: match.date, round: this.labelRoundKey(roundKey) }));
+      cache.add(roundKey);
+    }
+
+    applyDerivedAdvancementBonuses(seasonData) {
+      (seasonData.advancements || []).forEach((advance) => {
+        if (advance.reachedRoundKey && advance.reachedRoundKey !== 'champion') {
+          this.applyRoundBonus(seasonData.season, advance.team, advance.reachedRoundKey, advance);
+        }
+      });
+    }
+
+    getFinalWinner(match) {
+      if (match.penaltyWinner) return match.penaltyWinner;
+      if (match.homeGoals > match.awayGoals) return match.homeTeam;
+      if (match.awayGoals > match.homeGoals) return match.awayTeam;
+      return null;
+    }
+
+    processAllSeasons(seasons) {
+      this.reset();
+      const ordered = [...seasons].filter(Boolean).sort((a, b) => a.season.localeCompare(b.season));
+      ordered.forEach((season) => this.processSeason(season));
+      this.debugSummary = {
+        seasonsLoaded: ordered.length,
+        matchesLoaded: ordered.reduce((sum, season) => sum + season.matches.length, 0),
+        teamsLoaded: this.teams.size,
+        firstSeasonLoaded: ordered[0]?.season || '',
+        lastSeasonLoaded: ordered[ordered.length - 1]?.season || '',
+        parseWarnings: ordered.flatMap((season) => season.warnings || []),
+      };
+      console.info('Football Elo data summary', this.debugSummary);
+      return this;
+    }
+
+    getSeasonTeamStats(season, teamName) {
+      const key = `${season}|${teamName}`;
+      if (!this.seasonStats.has(key)) {
+        const startElo = this.teams.get(teamName)?.currentElo ?? 0;
+        this.seasonStats.set(key, {
+          season,
+          team: teamName,
+          startElo,
+          matches: 0,
+          wins: 0,
+          draws: 0,
+          losses: 0,
+          goalsFor: 0,
+          goalsAgainst: 0,
+          highestEloThisSeason: startElo,
+          stageReached: null,
+          isChampion: false,
+        });
+      }
+      return this.seasonStats.get(key);
+    }
+
+    prepareSeasonTeam(season, teamName, currentElo) {
+      const key = `${season}|${teamName}`;
+      if (!this.seasonTeamStartElo.has(key)) this.seasonTeamStartElo.set(key, currentElo);
+      const stats = this.getSeasonTeamStats(season, teamName);
+      stats.startElo = this.seasonTeamStartElo.get(key);
+      stats.highestEloThisSeason = Math.max(stats.highestEloThisSeason, currentElo);
+      return stats;
+    }
+
+    markStageReached(season, teamName, roundKeyOrName) {
+      const roundKey = this.normalizeStageKey(roundKeyOrName);
+      const stats = this.getSeasonTeamStats(season, teamName);
+      stats.stageReached = this.bestStage(stats.stageReached, roundKey);
+    }
+
+    createSeasonSnapshot(season) {
+      const rankings = Array.from(this.teams.values())
+        .map((team) => {
+          const stats = this.seasonStats.get(`${season}|${team.teamName}`);
+          const active = Boolean(stats && stats.matches > 0);
+          const startElo = stats?.startElo ?? this.seasonTeamStartElo.get(`${season}|${team.teamName}`) ?? team.currentElo;
+          return {
+            team: team.teamName,
+            elo: team.currentElo,
+            seasonEndElo: team.currentElo,
+            startingElo: team.startingElo,
+            seasonStartElo: startElo,
+            seasonChange: active ? team.currentElo - startElo : 0,
+            totalChange: team.currentElo - team.startingElo,
+            active,
+            matches: stats?.matches || 0,
+            wins: stats?.wins || 0,
+            draws: stats?.draws || 0,
+            losses: stats?.losses || 0,
+            goalsFor: stats?.goalsFor || 0,
+            goalsAgainst: stats?.goalsAgainst || 0,
+            goalDifference: (stats?.goalsFor || 0) - (stats?.goalsAgainst || 0),
+            highestEloThisSeason: stats?.highestEloThisSeason || team.currentElo,
+            stageReached: stats?.stageReached || null,
+            isChampion: stats?.isChampion || false,
+            firstSeason: team.firstSeason,
+            trophies: team.trophies,
+          };
+        })
+        .sort((a, b) => b.elo - a.elo)
+        .map((row, index) => ({ ...row, rank: index + 1 }));
+      return { season, rankings };
+    }
+
+    getSeasonSnapshot(season) { return this.seasonSnapshots.find((snapshot) => snapshot.season === season) || null; }
+
+    getAllTimeSnapshot() {
+      if (!this.seasonSnapshots.length) return { season: 'All Time', rankings: [] };
+      const rankings = Array.from(this.teams.values())
+        .map((team) => ({
+          team: team.teamName,
+          elo: team.currentElo,
+          seasonEndElo: team.currentElo,
+          startingElo: team.startingElo,
+          seasonStartElo: team.startingElo,
+          seasonChange: team.currentElo - team.startingElo,
+          totalChange: team.currentElo - team.startingElo,
+          active: true,
+          matches: team.matchesPlayed,
+          wins: team.wins,
+          draws: team.draws,
+          losses: team.losses,
+          goalsFor: team.goalsFor,
+          goalsAgainst: team.goalsAgainst,
+          goalDifference: team.goalsFor - team.goalsAgainst,
+          highestEloThisSeason: team.highestElo,
+          stageReached: this.getBestCareerStage(team.teamName),
+          isChampion: team.trophies > 0,
+          firstSeason: team.firstSeason,
+          trophies: team.trophies,
+        }))
+        .sort((a, b) => b.elo - a.elo)
+        .map((row, index) => ({ ...row, rank: index + 1 }));
+      return { season: 'All Time', rankings };
+    }
+
+    getBestCareerStage(teamName) {
+      let best = null;
+      this.seasonSnapshots.forEach((snapshot) => {
+        const row = snapshot.rankings.find((ranking) => ranking.team === teamName);
+        if (row?.stageReached) best = this.bestStage(best, row.stageReached);
+        if (row?.isChampion) best = 'champion';
+      });
+      return best;
+    }
+
+    getCurrentRankings() { return this.getAllTimeSnapshot().rankings; }
+    getTeamHistory(teamName) { return this.history.filter((entry) => entry.team === teamName); }
+
+    trackPeak(team, season, date, reason) {
       if (team.currentElo > team.highestElo) {
         team.highestElo = team.currentElo;
         team.highestEloSeason = season;
         team.peakEvents += 1;
-        this.history.push({
-          season,
-          date,
-          team: team.teamName,
-          opponent: null,
-          round: context,
-          oldElo: team.currentElo,
-          newElo: team.currentElo,
-          change: 0,
-          reason: 'personal_peak',
-          matchResult: null,
-          score: '',
-        });
+        this.history.push({ season, date, team: team.teamName, opponent: null, oldElo: null, newElo: team.currentElo, change: 0, reason: 'personal_peak', detail: reason });
       }
     }
 
-    updateExtremes(team, matchMeta, change) {
-      const record = {
-        opponent: team.teamName === matchMeta.homeTeam ? matchMeta.awayTeam : matchMeta.homeTeam,
-        score: matchMeta.score,
-        date: matchMeta.date,
-        round: matchMeta.round,
-        oldElo: team.teamName === matchMeta.homeTeam ? matchMeta.homeOldElo : matchMeta.awayOldElo,
-        newElo: team.teamName === matchMeta.homeTeam ? matchMeta.homeNewElo : matchMeta.awayNewElo,
-        change,
-      };
-      if (change > 0 && (!team.biggestWinGain || change > team.biggestWinGain.change)) team.biggestWinGain = record;
-      if (change < 0 && (!team.biggestLossDrop || change < team.biggestLossDrop.change)) team.biggestLossDrop = record;
+    bestStage(a, b) {
+      if (!a) return this.normalizeStageKey(b);
+      const ak = this.normalizeStageKey(a);
+      const bk = this.normalizeStageKey(b);
+      return (STAGE_ORDER[bk] ?? 0) > (STAGE_ORDER[ak] ?? 0) ? bk : ak;
+    }
+
+    normalizeStageKey(stage) {
+      if (!stage) return null;
+      if (STAGE_ORDER[stage] !== undefined) return stage;
+      return global.FootballDataAdapter?.classifyRound(stage) || stage;
+    }
+
+    labelRoundKey(roundKey) {
+      return ({ qualifying: 'Qualifying', group: 'Group Stage', league: 'League Phase', roundOf16: 'Round of 16', quarterFinal: 'Quarterfinals', semiFinal: 'Semifinals', final: 'Final', champion: 'Champion' })[roundKey] || roundKey;
     }
   }
 
-  function compareMatchesChronologically(a, b) {
-    return (a.date || '').localeCompare(b.date || '') || (a.order || 0) - (b.order || 0);
-  }
-
-  function compareSeasonLabels(a, b) {
-    return parseInt(a, 10) - parseInt(b, 10);
-  }
-
-  function groupBy(items, key) {
-    return items.reduce((acc, item) => {
-      const value = item[key];
-      acc[value] = acc[value] || [];
-      acc[value].push(item);
-      return acc;
-    }, {});
-  }
-
   global.FootballElo = {
-    ChampionsLeagueEloEngine,
     createEngine,
+    ChampionsLeagueEloEngine,
     INITIAL_ELO,
+    K_FACTORS,
+    GOAL_DIFFERENCE_MULTIPLIERS,
     ROUND_BONUSES,
     FINAL_WIN_BONUS,
   };
-})(window);
+})(typeof window !== 'undefined' ? window : globalThis);

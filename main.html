@@ -9,7 +9,7 @@
 <body>
   <header class="hero">
     <div>
-      <p class="eyebrow">European Cup analytics MVP</p>
+      <p class="eyebrow">European Cup analytics</p>
       <h1>Champions League Elo Ratings</h1>
       <p class="intro">
         A browser-based Elo dashboard for UEFA Champions League and European Cup matches.
@@ -18,9 +18,9 @@
       </p>
     </div>
     <div class="source-card">
-      <span>Intended source</span>
-      <strong>openfootball/champions-league</strong>
-      <p>Current build runs on illustrative normalized sample data, not a complete official match archive; the adapter layer is ready for football.txt imports.</p>
+      <span>Local source</span>
+      <strong>europe-champions-league-master</strong>
+      <p>Loads local champs.csv and cl.txt files from 1955-56 through 2025-26 when served by a static web server.</p>
     </div>
   </header>
 
@@ -34,7 +34,7 @@
       <div class="panel-header">
         <div>
           <h2>Elo Ranking</h2>
-          <p id="rankingCaption">Latest ratings after all sample seasons</p>
+          <p id="rankingCaption">Loading local Champions League data…</p>
         </div>
         <div class="controls">
           <label>
@@ -88,7 +88,7 @@
   </main>
 
   <script src="dataAdapter.js"></script>
-  <script src="sampleData.js"></script>
+  <script src="seasonLoader.js"></script>
   <script src="FootballEloLogic.js"></script>
   <script src="records.js"></script>
   <script src="ui.js"></script>
