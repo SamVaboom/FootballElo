@@ -80,7 +80,13 @@
       <div class="panel-header">
         <div>
           <h2>Records / Stats</h2>
-          <p>Calculated from Elo history entries, match metadata, and end-of-season snapshots.</p>
+          <p id="recordsCaption">Calculated from the full historical Elo timeline.</p>
+        </div>
+        <div class="controls">
+          <label>
+            Season
+            <select id="recordsSeasonSelect"></select>
+          </label>
         </div>
       </div>
       <div id="recordsGrid" class="records-grid"></div>

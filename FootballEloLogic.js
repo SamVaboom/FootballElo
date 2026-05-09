@@ -4,14 +4,7 @@
  * opposite before bonuses are applied.
  */
 (function (global) {
-  const INITIAL_ELO = {
-    qualifying: 800,
-    preliminary: 800,
-    group: 1500,
-    league: 1500,
-    knockout: 1500,
-    final: 1500,
-  };
+  const INITIAL_ELO = 1000;
 
   const K_FACTORS = {
     qualifying: 24,
@@ -34,13 +27,13 @@
   };
 
   const ROUND_BONUSES = {
-    roundOf16: 50,
-    quarterFinal: 50,
-    semiFinal: 50,
-    final: 50,
+    roundOf16: 20,
+    quarterFinal: 20,
+    semiFinal: 20,
+    final: 20,
   };
 
-  const FINAL_WIN_BONUS = 200;
+  const FINAL_WIN_BONUS = 50;
   const STAGE_ORDER = global.FootballDataAdapter?.STAGE_ORDER || {
     qualifying: 0, group: 1, league: 1, knockout: 1, roundOf16: 2, quarterFinal: 3, semiFinal: 4, final: 5, champion: 6,
   };
@@ -68,12 +61,8 @@
       this.debugSummary = null;
     }
 
-    getInitialEloForEntryStage(entryStage) {
-      const normalized = (entryStage || '').toLowerCase();
-      if (normalized.includes('qual') || normalized.includes('prelim')) return INITIAL_ELO.qualifying;
-      if (normalized.includes('league')) return INITIAL_ELO.league;
-      if (normalized.includes('knock') || normalized.includes('round') || normalized.includes('final')) return INITIAL_ELO.knockout;
-      return INITIAL_ELO.group;
+    getInitialEloForEntryStage() {
+      return INITIAL_ELO;
     }
 
     initializeTeam(teamName, firstSeason, firstEntryStage) {
@@ -319,8 +308,8 @@
       const participationBonusApplied = new Set();
       matches.forEach((match) => {
         this.prepareEntrantsForMatch(match);
-        this.applyParticipationBonuses(seasonData, match, participationBonusApplied);
         const meta = this.processMatch(match);
+        this.applyParticipationBonuses(seasonData, match, participationBonusApplied);
         if (match.roundKey === 'final') {
           const winner = this.getFinalWinner(match);
           if (winner) this.applyFinalWinBonus(season, winner, { date: match.date, opponent: winner === match.homeTeam ? match.awayTeam : match.homeTeam, score: meta.score });
